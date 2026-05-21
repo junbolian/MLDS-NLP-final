@@ -1,0 +1,12 @@
+{
+  "total_cases": 1602,
+  "n_train": 1129,
+  "n_val": 161,
+  "n_test": 312,
+  "median_source_tokens": 44789,
+  "mean_source_tokens": 94428,
+  "max_source_tokens": 3002324,
+  "class_action_rate": 0.41760299625468167,
+  "n_case_type_groups": 5,
+  "other_pct": 0.0
+}
