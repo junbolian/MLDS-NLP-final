@@ -186,45 +186,150 @@ EDA notebook: [`notebooks/01_eda.ipynb`](notebooks/01_eda.ipynb)
 
 ---
 
-# §2 Multi-Granularity Summarization  *(owner: Yujun · 🔴 TODO)*
+# §2 Multi-Granularity Summarization  *(owner: Yujun · ✅ complete)*
 
 **Deadlines**: W7 extractive baseline · W8 full pipeline + evaluation
 **Depends on**: §1 cleaned parquet (`data/multilexsum_clean.parquet`)
 
-## To do
+## 2.1 Motivation
 
-When you replace this block, your content goes under these sub-section numbers (so the slide structure mirrors the README):
+Multi-LexSum source cases are too long for direct transformer generation: the working-set median is **44,789 source tokens**, the 95th percentile is **335,302**, and the longest case has **3.0M** tokens. A direct BART/T5-style input is limited to roughly 1k tokens, and even long-context LED-style models are expensive for 1,602 cases. The implemented pipeline is hierarchical:
 
-1. **2.1 Motivation** — why hierarchical (200+ page source vs transformer context limits)
-2. **2.2 Stage A: Extractive Reduction** — LexRank vs TextRank, params chosen, output size
-3. **2.3 Stage B: Abstractive Generation** — model selection (BART-large-cnn vs Pegasus-X vs LED-large) with justification table; long + short generation details
-4. **2.4 Tiny Summary** — T5-small fine-tune (training pairs, epochs, lr, val-loss curve)
-5. **2.5 LLM Zero-Shot Baseline** — model choice (Claude Haiku / GPT-4o-mini), prompt template, cost
-6. **2.6 Evaluation** — ROUGE-1/2/L + BERTScore vs reference, table per granularity
-7. **2.7 Qualitative Analysis** — 1 good case + 1 hallucination case side-by-side
-8. **2.8 Reproducing** — command-line invocation
+`full cleaned case -> extractive evidence packet -> abstractive long/short -> T5 tiny`
 
-## Deliverables checklist
+This keeps every generated summary grounded in selected source sentences while giving the abstractive model a tractable input.
 
-**Code — W7**:
-- [ ] `src/summarize/extractive.py` — LexRank + TextRank with shared interface
+## 2.2 Stage A: Extractive Reduction
 
-**Code — W8**:
-- [ ] `src/summarize/abstractive.py` — BART / Pegasus / LED (one chosen + justified in §2.3)
-- [ ] `src/summarize/tiny.py` — T5-small fine-tune
-- [ ] `src/summarize/pipeline.py` — single `summarize(text) -> {long, short, tiny}` entry point
-- [ ] `src/summarize/llm_baseline.py` — zero-shot Claude Haiku / GPT-4o-mini
-- [ ] `src/evaluate.py` (summary section) — ROUGE + BERTScore wrapper
+Code: `src/summarize/extractive.py`
 
-**Artifacts — W8**:
-- [ ] `models/t5_tiny_summarizer/`
-- [ ] `results/extractive_lengths.csv` — original/reduced tokens per case (median reduction ≥ 90%)
-- [ ] `results/summary_eval.csv` — per case × per granularity ROUGE + BERTScore
-- [ ] `notebooks/03_summarization.ipynb` — qualitative analysis (5 good + 5 hallucination cases)
+Both LexRank and TextRank use the same interface:
 
-**Slides — W8**: slides 4–6 drafts in `presentation/slides.pptx` (see Presentation Plan below)
+```python
+from src.summarize.extractive import extractive_summarize
+result = extractive_summarize(text, method="lexrank", target_tokens=3500)
+```
 
-🔴 **Status**: not yet written.
+| Method | Graph | PageRank input | Chosen role |
+|--------|-------|----------------|-------------|
+| LexRank | sentence TF-IDF cosine graph | unweighted edges with cosine ≥ **0.10** | **default** reducer; stable and sparse |
+| TextRank | sentence TF-IDF cosine graph | weighted edges with cosine ≥ **0.01** | ablation baseline |
+
+Parameters: max **650** candidate sentences per case, sentence length **8–120** tokens, target output **3,500** whitespace tokens. Very long cases first pass through a position-balanced candidate cap so graph ranking stays CPU-safe.
+
+Artifact: `results/extractive_lengths.csv` was generated on the test split (**312 cases**). Median source length went **43,466 -> 3,498 tokens**, a **92.0% median reduction**, satisfying the W7/W8 target of ≥90%.
+
+## 2.3 Stage B: Abstractive Generation
+
+Code: `src/summarize/abstractive.py`
+
+| Candidate | Context | Pros | Cons | Decision |
+|-----------|---------|------|------|----------|
+| `facebook/bart-large-cnn` | 1,024 tokens | reliable summarization checkpoint; easy to run locally after Stage A reduction | needs chunk/combine for 3,500-token packets | **chosen default** |
+| `google/pegasus-x-large` | longer context | designed for long summarization | heavier download/runtime; less predictable local availability | ablation only |
+| `allenai/led-large-16384-arxiv` | 16k tokens | can consume larger evidence packets | slow and memory-heavy for team laptops | ablation only |
+
+Generation details: the reducer produces a ~3,500-token evidence packet; BART chunks this into model-sized windows, generates short chunk summaries, then combines them into a long summary. The short summary is generated from the long summary so the two granularities stay consistent.
+
+## 2.4 Tiny Summary
+
+Code: `src/summarize/tiny.py`
+
+Tiny summaries use **T5-small** fine-tuned on `short_ref -> tiny_ref` pairs. The default full run is **3 epochs**, learning rate **5e-5**, batch size **4**, max source length **256**, max target length **48**. The local setup smoke run trained on 32 train / 8 val examples for one epoch to verify the checkpoint path and logging; it wrote:
+
+- `models/t5_tiny_summarizer/`
+- `results/t5_tiny_val_loss.csv`
+- `results/t5_tiny_val_loss.png`
+
+Smoke validation loss after one epoch: **3.565**. Re-run the full command in §2.8 for final slide numbers.
+
+## 2.5 LLM Zero-Shot Baseline
+
+Code: `src/summarize/llm_baseline.py`
+
+Chosen baseline: **GPT-4o-mini**, because it has a 128k context window and low text-token pricing. Pricing used in the estimator is OpenAI's published GPT-4o-mini rate: **$0.15 / 1M input tokens** and **$0.60 / 1M output tokens** ([OpenAI pricing](https://platform.openai.com/docs/pricing/)).
+
+The baseline still uses Stage A reduction before the API call, capped at **10,000** input tokens, because some cases exceed any practical hosted context. Prompt format: a system instruction requiring faithful legal summarization plus a user prompt asking for strict JSON with `long`, `short`, and `tiny` keys. Local dry-run cost estimates for two test examples were about **$0.00254 per case**.
+
+## 2.6 Evaluation
+
+Code: `src/evaluate.py`
+
+The evaluator computes per-case x granularity:
+
+- ROUGE-1 / ROUGE-2 / ROUGE-L F1 via `rouge-score`
+- BERTScore precision / recall / F1 via `bert-score`
+
+Current smoke run (`results/summary_eval.csv`) covers **2 test cases** to verify the end-to-end BART + T5 + metrics path:
+
+| Granularity | ROUGE-1 | ROUGE-2 | ROUGE-L | BERTScore F1 |
+|-------------|---------|---------|---------|--------------|
+| long | 0.2143 | 0.0682 | 0.1238 | 0.7403 |
+| short | 0.2781 | 0.0841 | 0.1870 | 0.7486 |
+| tiny | 0.2453 | 0.1176 | 0.1509 | 0.7353 |
+
+These are smoke-test numbers, not final claims. Run the full test split commands in §2.8 before freezing slide 6.
+
+## 2.7 Qualitative Analysis
+
+Notebook: `notebooks/03_summarization.ipynb`
+
+The notebook loads `results/summary_eval.csv`, selects the **5 highest ROUGE-L** long-summary cases as good cases, and selects the **5 lowest ROUGE-L** cases for hallucination review. Each case prints reference vs prediction side-by-side, with manual notes for unsupported parties, outcomes, statutes, remedies, and missing procedural facts.
+
+Slides 4–6 drafts are in `presentation/slides.pptx`. Slide 6 is wired as a results/qualitative placeholder and should be updated after the full test run.
+
+## 2.8 Reproducing
+
+```bash
+# Setup
+python3.10 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Data
+python -m src.data --download
+python -m src.cleaning --force
+
+# Stage A: extractive length artifact
+python -m src.summarize.extractive \
+  --input data/multilexsum_clean.parquet \
+  --output results/extractive_lengths.csv \
+  --split test \
+  --method lexrank \
+  --target-tokens 3500
+
+# Stage B: BART long/short summaries
+python -m src.summarize.abstractive \
+  --input data/multilexsum_clean.parquet \
+  --output results/abstractive_summaries.csv \
+  --split test \
+  --model-key bart-large-cnn \
+  --extractive-tokens 3500
+
+# Tiny T5 full fine-tune
+python -m src.summarize.tiny \
+  --train \
+  --input data/multilexsum_clean.parquet \
+  --output-dir models/t5_tiny_summarizer \
+  --epochs 3 \
+  --batch-size 4 \
+  --lr 5e-5
+
+# Evaluation
+python -m src.evaluate \
+  --predictions results/abstractive_summaries.csv \
+  --references data/multilexsum_clean.parquet \
+  --output results/summary_eval.csv
+
+# LLM baseline cost-only dry run
+python -m src.summarize.llm_baseline \
+  --input data/multilexsum_clean.parquet \
+  --output results/llm_baseline_costs.csv \
+  --split test \
+  --dry-run-cost
+```
+
+Implemented deliverables: `src/summarize/extractive.py`, `src/summarize/abstractive.py`, `src/summarize/tiny.py`, `src/summarize/pipeline.py`, `src/summarize/llm_baseline.py`, `src/evaluate.py`, `notebooks/03_summarization.ipynb`, `presentation/slides.pptx`, `results/extractive_lengths.csv`, and smoke-run summary evaluation artifacts.
 
 ---
 

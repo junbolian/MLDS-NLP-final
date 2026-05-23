@@ -1,0 +1,181 @@
+"""Evaluation helpers for project outputs.
+
+This file currently implements the summarization section: ROUGE-1/2/L and
+BERTScore against Multi-LexSum references. Classification metrics can be added
+under the same CLI later by extending `--task`.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import pandas as pd
+from rouge_score import rouge_scorer
+from tqdm import tqdm
+
+from src.utils import RESULTS_DIR, get_logger
+
+logger = get_logger(__name__)
+
+SUMMARY_GRANULARITIES = ("long", "short", "tiny")
+
+
+def _safe_text(value) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value)
+
+
+def _rouge_rows(preds: list[str], refs: list[str]) -> list[dict[str, float]]:
+    scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
+    rows = []
+    for pred, ref in zip(preds, refs):
+        scores = scorer.score(ref, pred)
+        rows.append(
+            {
+                "rouge1": scores["rouge1"].fmeasure,
+                "rouge2": scores["rouge2"].fmeasure,
+                "rougeL": scores["rougeL"].fmeasure,
+            }
+        )
+    return rows
+
+
+def _bertscore_rows(
+    preds: list[str],
+    refs: list[str],
+    *,
+    model_type: str,
+    batch_size: int,
+    device: str | None,
+) -> list[dict[str, float]]:
+    from bert_score import score as bert_score
+
+    precision, recall, f1 = bert_score(
+        preds,
+        refs,
+        lang="en",
+        model_type=model_type,
+        batch_size=batch_size,
+        device=device,
+        verbose=False,
+    )
+    return [
+        {
+            "bertscore_p": float(p),
+            "bertscore_r": float(r),
+            "bertscore_f1": float(f),
+        }
+        for p, r, f in zip(precision, recall, f1)
+    ]
+
+
+def evaluate_summaries(
+    predictions: pd.DataFrame,
+    references: pd.DataFrame,
+    *,
+    include_bertscore: bool = True,
+    bertscore_model: str = "distilbert-base-uncased",
+    bertscore_batch_size: int = 8,
+    device: str | None = None,
+) -> pd.DataFrame:
+    """Return per-case x granularity ROUGE and BERTScore metrics."""
+
+    if "case_id" not in predictions.columns:
+        raise ValueError("Predictions CSV must contain a `case_id` column.")
+    merged = predictions.merge(
+        references[["case_id", "long_ref", "short_ref", "tiny_ref"]],
+        on="case_id",
+        how="inner",
+        validate="many_to_one",
+    )
+    if merged.empty:
+        raise ValueError("No predictions matched references by case_id.")
+
+    all_rows: list[dict] = []
+    for granularity in SUMMARY_GRANULARITIES:
+        pred_col = f"{granularity}_pred"
+        ref_col = f"{granularity}_ref"
+        if pred_col not in merged.columns:
+            logger.warning("Skipping %s: missing %s", granularity, pred_col)
+            continue
+
+        work = merged[["case_id", pred_col, ref_col]].copy()
+        preds = [_safe_text(x) for x in work[pred_col].tolist()]
+        refs = [_safe_text(x) for x in work[ref_col].tolist()]
+        rouge = _rouge_rows(preds, refs)
+        bert = (
+            _bertscore_rows(
+                preds,
+                refs,
+                model_type=bertscore_model,
+                batch_size=bertscore_batch_size,
+                device=device,
+            )
+            if include_bertscore
+            else [{} for _ in preds]
+        )
+
+        for case_id, r_scores, b_scores in tqdm(
+            zip(work["case_id"], rouge, bert),
+            total=len(work),
+            desc=f"metrics:{granularity}",
+        ):
+            all_rows.append(
+                {
+                    "case_id": case_id,
+                    "granularity": granularity,
+                    **r_scores,
+                    **b_scores,
+                }
+            )
+
+    return pd.DataFrame(all_rows)
+
+
+def summarize_metric_table(metrics: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate per-case rows into one table per granularity."""
+
+    metric_cols = [c for c in metrics.columns if c not in {"case_id", "granularity"}]
+    return metrics.groupby("granularity", as_index=False)[metric_cols].mean(numeric_only=True)
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Evaluate summarization or classification outputs.")
+    parser.add_argument("--task", choices=["summarization"], default="summarization")
+    parser.add_argument("--predictions", required=True, help="CSV with case_id and *_pred columns.")
+    parser.add_argument("--references", default="data/multilexsum_clean.parquet")
+    parser.add_argument("--output", default=str(RESULTS_DIR / "summary_eval.csv"))
+    parser.add_argument("--summary-output", default=str(RESULTS_DIR / "summary_eval_by_granularity.csv"))
+    parser.add_argument("--skip-bertscore", action="store_true")
+    parser.add_argument("--bertscore-model", default="distilbert-base-uncased")
+    parser.add_argument("--bertscore-batch-size", type=int, default=8)
+    parser.add_argument("--device", choices=["cpu", "cuda", "mps"])
+    return parser
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
+    predictions = pd.read_csv(args.predictions)
+    references = pd.read_parquet(args.references)
+    metrics = evaluate_summaries(
+        predictions,
+        references,
+        include_bertscore=not args.skip_bertscore,
+        bertscore_model=args.bertscore_model,
+        bertscore_batch_size=args.bertscore_batch_size,
+        device=args.device,
+    )
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    metrics.to_csv(output, index=False)
+    logger.info("Wrote per-case summary evaluation -> %s", output)
+
+    summary_output = Path(args.summary_output)
+    summarize_metric_table(metrics).to_csv(summary_output, index=False)
+    logger.info("Wrote aggregate summary evaluation -> %s", summary_output)
+
+
+if __name__ == "__main__":
+    main()

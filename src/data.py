@@ -152,6 +152,10 @@ def _coerce_bool(v: Any) -> Any:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download/cache Multi-LexSum.")
     parser.add_argument(
+        "--download", action="store_true",
+        help="Compatibility alias for the README quick-start; download/cache if needed.",
+    )
+    parser.add_argument(
         "--force", action="store_true",
         help="Re-download and re-cache even if parquet exists.",
     )

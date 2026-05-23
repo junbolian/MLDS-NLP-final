@@ -1,0 +1,3 @@
+case_id,split,model,llm_input_tokens_est,llm_cost_usd_est
+CJ-AL-0007,test,gpt-4o-mini,13361,0.00254415
+CJ-AL-0020,test,gpt-4o-mini,13362,0.0025443

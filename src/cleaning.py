@@ -23,6 +23,7 @@ From Python:
 from __future__ import annotations
 
 import argparse
+import gc
 import re
 from typing import Optional
 
@@ -125,31 +126,39 @@ def build_clean_dataframe(force: bool = False) -> pd.DataFrame:
     raw = load_and_cache_raw()
     logger.info(f"Starting cleaning on {len(raw)} rows...")
 
-    df = raw.copy()
+    # Filter incomplete records before the expensive regex passes. This is
+    # equivalent to the final working-set filter below, but avoids cleaning
+    # thousands of cases that cannot be used downstream.
+    required_columns = [
+        "long_ref", "short_ref", "tiny_ref",
+        "class_action_sought", "case_type_raw",
+    ]
+    before = len(raw)
+    df = raw.dropna(subset=required_columns).copy()
+    del raw
+    gc.collect()
+    after_na = len(df)
+    logger.info(
+        f"Dropped {before - after_na} rows missing summaries/metadata before cleaning; "
+        f"cleaning {after_na} candidate rows."
+    )
 
     # Step 1: clean text
     df["source_text"] = df["source_text"].apply(clean_text)
 
     # Step 2: add length columns
     df["source_n_chars"] = df["source_text"].str.len()
-    df["source_n_tokens"] = df["source_text"].str.split().str.len().fillna(0).astype(int)
+    df["source_n_tokens"] = df["source_text"].map(lambda s: len(str(s).split())).astype(int)
 
     # Step 3: group case_type
     df["case_type_grouped"] = df["case_type_raw"].apply(group_case_type)
 
-    # Step 4: drop incomplete rows
-    before = len(df)
-    df = df.dropna(subset=[
-        "long_ref", "short_ref", "tiny_ref",
-        "class_action_sought", "case_type_raw",
-    ])
-    after_na = len(df)
+    # Step 4: drop near-empty rows after cleaning
     df = df[df["source_n_chars"] >= 100]
     after_len = len(df)
 
     logger.info(
-        f"Dropped {before - after_na} rows missing summaries/metadata; "
-        f"dropped {after_na - after_len} near-empty cases. "
+        f"Dropped {after_na - after_len} near-empty cases after cleaning. "
         f"Final: {after_len} rows."
     )
 
