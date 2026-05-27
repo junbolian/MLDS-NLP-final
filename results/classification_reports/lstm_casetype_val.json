@@ -1,0 +1,45 @@
+{
+  "Criminal Justice": {
+    "precision": 0.8285714285714286,
+    "recall": 0.6904761904761905,
+    "f1-score": 0.7532467532467533,
+    "support": 42.0
+  },
+  "Civil Rights & Equality": {
+    "precision": 0.625,
+    "recall": 0.7894736842105263,
+    "f1-score": 0.6976744186046512,
+    "support": 19.0
+  },
+  "Healthcare & Disability": {
+    "precision": 0.3,
+    "recall": 0.3333333333333333,
+    "f1-score": 0.3157894736842105,
+    "support": 9.0
+  },
+  "Immigration & Education": {
+    "precision": 0.6739130434782609,
+    "recall": 0.6888888888888889,
+    "f1-score": 0.6813186813186813,
+    "support": 45.0
+  },
+  "Speech & Voting": {
+    "precision": 0.7391304347826086,
+    "recall": 0.7391304347826086,
+    "f1-score": 0.7391304347826086,
+    "support": 46.0
+  },
+  "accuracy": 0.6956521739130435,
+  "macro avg": {
+    "precision": 0.6333229813664596,
+    "recall": 0.6482605063383096,
+    "f1-score": 0.637431952327381,
+    "support": 161.0
+  },
+  "weighted avg": {
+    "precision": 0.7062179314069674,
+    "recall": 0.6956521739130435,
+    "f1-score": 0.6980970404493825,
+    "support": 161.0
+  }
+}
