@@ -1,13 +1,21 @@
 """Evaluation helpers for project outputs.
 
-This file currently implements the summarization section: ROUGE-1/2/L and
-BERTScore against Multi-LexSum references. Classification metrics can be added
-under the same CLI later by extending `--task`.
+Two task families share one CLI:
+  * ``--task summarization``  : ROUGE-1/2/L + BERTScore against Multi-LexSum
+                                references (Yujun's §2).
+  * ``--task classification`` : accuracy / F1 / AUC / per-class report for
+                                the §3 classifiers. Reads a predictions CSV
+                                with columns ``case_id, y_true, y_pred`` plus
+                                an optional ``y_proba_*`` per class for AUC.
+
+The classification path is the unified evaluation entry that the §4 Gradio
+app's "Error Analysis" tab calls into.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -141,9 +149,72 @@ def summarize_metric_table(metrics: pd.DataFrame) -> pd.DataFrame:
     return metrics.groupby("granularity", as_index=False)[metric_cols].mean(numeric_only=True)
 
 
+def evaluate_classification(
+    predictions: pd.DataFrame,
+    *,
+    label_names: list[str] | None = None,
+) -> dict:
+    """Compute classification metrics from a predictions DataFrame.
+
+    Required columns:
+      - ``y_true`` (int)
+      - ``y_pred`` (int)
+
+    Optional columns:
+      - ``y_proba_<class>`` per class for AUC. Binary may instead supply
+        ``y_proba_1`` (positive-class probability) only.
+
+    Returns a dict with: accuracy, f1_macro, f1_weighted, auc_roc,
+    confusion (nested list), per_class_report (sklearn dict).
+    """
+    from sklearn.metrics import (  # local import keeps top of file light
+        accuracy_score,
+        classification_report,
+        confusion_matrix,
+        f1_score,
+        roc_auc_score,
+    )
+
+    for required in ("y_true", "y_pred"):
+        if required not in predictions.columns:
+            raise ValueError(f"Predictions CSV missing required column {required!r}.")
+
+    y_true = predictions["y_true"].to_numpy()
+    y_pred = predictions["y_pred"].to_numpy()
+    n_classes = int(max(y_true.max(), y_pred.max()) + 1)
+    labels = list(range(n_classes))
+    target_names = label_names or [f"class_{i}" for i in labels]
+
+    auc: float | None = None
+    proba_cols = [c for c in predictions.columns if c.startswith("y_proba_")]
+    if proba_cols:
+        try:
+            if n_classes == 2 and "y_proba_1" in proba_cols:
+                auc = float(roc_auc_score(y_true, predictions["y_proba_1"]))
+            elif len(proba_cols) == n_classes:
+                proba_cols_sorted = sorted(proba_cols, key=lambda c: int(c.split("_")[-1]))
+                proba = predictions[proba_cols_sorted].to_numpy()
+                auc = float(roc_auc_score(y_true, proba, multi_class="ovr", average="macro"))
+        except ValueError as exc:
+            logger.warning("AUC computation skipped: %s", exc)
+
+    report = classification_report(
+        y_true, y_pred, labels=labels, target_names=target_names,
+        output_dict=True, zero_division=0,
+    )
+    return {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "f1_macro": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "f1_weighted": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
+        "auc_roc": auc,
+        "confusion": confusion_matrix(y_true, y_pred, labels=labels).tolist(),
+        "per_class_report": report,
+    }
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate summarization or classification outputs.")
-    parser.add_argument("--task", choices=["summarization"], default="summarization")
+    parser.add_argument("--task", choices=["summarization", "classification"], default="summarization")
     parser.add_argument("--predictions", required=True, help="CSV with case_id and *_pred columns.")
     parser.add_argument("--references", default="data/multilexsum_clean.parquet")
     parser.add_argument("--output", default=str(RESULTS_DIR / "summary_eval.csv"))
@@ -152,11 +223,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bertscore-model", default="distilbert-base-uncased")
     parser.add_argument("--bertscore-batch-size", type=int, default=8)
     parser.add_argument("--device", choices=["cpu", "cuda", "mps"])
+    parser.add_argument("--label-names", nargs="+",
+                        help="Class names (classification only) — used in per-class report.")
     return parser
+
+
+def _run_classification(args: argparse.Namespace) -> None:
+    predictions = pd.read_csv(args.predictions)
+    result = evaluate_classification(predictions, label_names=args.label_names)
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.with_suffix(".json").open("w") as fh:
+        json.dump(result, fh, indent=2)
+    logger.info("Wrote classification metrics → %s", output.with_suffix(".json"))
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    if args.task == "classification":
+        _run_classification(args)
+        return
+
     predictions = pd.read_csv(args.predictions)
     references = pd.read_parquet(args.references)
     metrics = evaluate_summaries(

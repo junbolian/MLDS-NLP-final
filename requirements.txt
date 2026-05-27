@@ -26,10 +26,13 @@ sentencepiece>=0.1.99
 accelerate>=0.25.0
 openai>=1.0.0
 
-# Classification deep models (Feng) — install on demand
-# tensorflow>=2.15.0
-# gensim>=4.3.0
-# shap>=0.44.0
+# Classification (Feng)
+# - shap is needed in W7 for LR top-token explanations (§3.4)
+# - torch is shared with §2 (already declared above)
+# - gensim is needed in W8 for self-trained Word2Vec embeddings (§3.5 Bi-LSTM)
+shap>=0.44.0
+gensim>=4.3.0
+# (No TensorFlow — Bi-LSTM is PyTorch to match §2's BART/Legal-BERT stack.)
 
 # Interactive app (Jianong) — install on demand
 # gradio>=4.0.0
