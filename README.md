@@ -333,54 +333,104 @@ Implemented deliverables: `src/summarize/extractive.py`, `src/summarize/abstract
 
 ---
 
-# §3 Classification  *(owner: Feng · 🔴 TODO)*
+# §3 Classification  *(owner: Feng · ✅ complete)*
 
-**Deadlines**: W7 classical baselines (NB + LR) · W8 deep models (Bi-LSTM + Legal-BERT)
-**Depends on**: §1 cleaned parquet · §2 long summaries (optional; can start with `long_ref` reference summaries while waiting)
+Two classification tasks, four models per task, one unified CLI. The headline:
+**Legal-BERT wins both tasks** (test macro-F1 = 0.948 binary / 0.854 multi-class), and is
+the *only* model that handles the long-tail multi-class label.
 
-## To do
+## 3.1 Task setup
 
-Sub-section numbering (mirrors slides 7-9):
+| Task | Target column | Classes | Test positives / class |
+|------|---------------|---------|------------------------|
+| `class_action` | `class_action_sought` | 2 (Yes / No) | 116 / 196 |
+| `case_type`    | `case_type_grouped`   | 5 (Criminal Justice, Civil Rights & Equality, Healthcare & Disability, Immigration & Education, Speech & Voting) | 107 / 42 / 16 / 74 / 73 |
 
-1. **3.1 Task Setup** — input choice (`long_ref` initially, then model-generated long summary); train/val/test sizes per task
-2. **3.2 Featurization** — TF-IDF (uni+bigram) for classical; Word2Vec for LSTM; Legal-BERT tokenizer for BERT
-3. **3.3 Naive Bayes** — variant, smoothing, class balancing
-4. **3.4 Logistic Regression** — regularization, class balancing, SHAP top-token plot
-5. **3.5 Bi-LSTM** — architecture (layers, hidden dim, dropout), embedding init, training config
-6. **3.6 Legal-BERT Fine-tune** — `nlpaueb/legal-bert-base-uncased`, training config, GPU notes
-7. **3.7 Results — class_action_sought** — 4-model table (accuracy, F1, AUC) + ROC plot
-8. **3.8 Results — case_type** — 4-model table (macro-F1, per-class P/R) + confusion matrices
-9. **3.9 Reproducing** — command-line invocations
+Input text: **`long_ref`** (the human-written long reference summary, median ≈ 250 tokens) — fits Legal-BERT's 512-token cap with no chunking, and gives every model the exact same input. Split: 1,129 train / 161 val / 312 test (from §1 cleaning).
 
-## Deliverables checklist
+## 3.2 Featurization
 
-**Code — W7**:
-- [ ] `src/features.py` — TF-IDF (uni+bigram) + class-balanced support
-- [ ] `src/classify/classical.py` — NB + LR with consistent train/eval API
-- [ ] `src/classify/train.py` — unified training entry: `python -m src.classify.train --task class_action --model nb`
+| Model         | Feature                            | Where |
+|---------------|------------------------------------|-------|
+| Naive Bayes   | TF-IDF (uni + bigram, max 50k, `sublinear_tf=True`) | `src/features.py` |
+| Logistic Reg  | same TF-IDF, pipelined             | `src/features.py` |
+| Bi-LSTM       | self-trained Word2Vec (300d, gensim, training-split corpus only) | `src/classify/lstm.py` |
+| Legal-BERT    | `nlpaueb/legal-bert-base-uncased` tokenizer, max 512 | `src/classify/bert.py` |
 
-**Code — W8**:
-- [ ] `src/classify/lstm.py` — Bi-LSTM with Word2Vec init (TF/Keras)
-- [ ] `src/classify/bert.py` — HF Transformers fine-tune loop
+## 3.3 Naive Bayes
 
-**Artifacts — W7**:
-- [ ] `models/nb_classaction.pkl`, `models/lr_classaction.pkl`
-- [ ] `models/nb_casetype.pkl`, `models/lr_casetype.pkl`
-- [ ] `results/lr_shap_classaction.png`, `results/lr_shap_casetype.png`
-- [ ] `notebooks/04_classification_class_action.ipynb` (NB + LR sections)
-- [ ] `results/classification_metrics.csv` — appended per model
+`sklearn.naive_bayes.ComplementNB(alpha=0.3)` — Complement variant is more stable than MultinomialNB on the imbalanced 5-class `case_type` task where the smallest class is 8× smaller than the largest.
 
-**Artifacts — W8**:
-- [ ] `models/lstm_classaction.h5`, `models/lstm_casetype.h5`
-- [ ] `models/bert_classaction/`, `models/bert_casetype/`
-- [ ] `results/training_curves/lstm_*.png` (loss + accuracy per epoch — required by syllabus W5)
-- [ ] `results/confusion_matrices/*.png` for all 4 models on case_type
-- [ ] `notebooks/05_classification_case_type.ipynb` (all 4 models on case_type)
-- [ ] Final `results/classification_metrics.csv` with all 4 × 2 = 8 model scores
+## 3.4 Logistic Regression
 
-**Slides — W8**: slides 7–9 drafts in `presentation/slides.pptx`
+`LogisticRegression(solver='saga', penalty='l2', C=1.0, class_weight='balanced', max_iter=2000)`. The `class_weight='balanced'` re-weighting matches the rationale in [`docs/case_type_grouping.md`](docs/case_type_grouping.md). **SHAP top-token explanation** via `shap.LinearExplainer` (exact for sparse linear models, no sampling) — saved to `results/lr_shap_{classaction,casetype}.png`.
 
-🔴 **Status**: not yet written.
+## 3.5 Bi-LSTM
+
+PyTorch (not TF/Keras — keeps the project on one DL stack alongside §2 BART/T5). Architecture: `Embedding(vocab, 300, _weight=W2V) → BiLSTM(hidden=128, layers=1, dropout=0.3) → Linear`. Training: AdamW, lr 1e-3, batch 16, class-weighted cross-entropy, 10 epochs with early-stopping on val accuracy (patience 3). Word2Vec is trained on the **training-split tokens only** to avoid leakage.
+
+## 3.6 Legal-BERT fine-tune
+
+`nlpaueb/legal-bert-base-uncased` (110M params), pretrained on US + EU legal corpora. Training: AdamW, lr 2e-5, batch 8 with grad-accumulation 2 (effective 16), linear warmup over 10% of steps, 3 epochs (more overfits on 1,129 samples), class-weighted cross-entropy. **Compute**: Colab A100 fine-tunes each task in ~85 seconds. For free-T4 fallback, append `--bert-model-name distilbert-base-uncased` at ~2 F1-points cost.
+
+## 3.7 Results — `class_action_sought`
+
+Binary task, 312 test cases. AUC ≥ 0.92 for every model; macro-F1 separates them.
+
+| Model        | Features            | Accuracy | Macro-F1 | AUC   | Notes |
+|--------------|---------------------|---------:|---------:|------:|-------|
+| Naive Bayes  | TF-IDF (Complement) |   0.814  |   0.809  | 0.920 | Strong sparse baseline |
+| LR (TF-IDF)  | L2 · balanced       |   0.894  |   0.890  | 0.968 | 1-sec training, surprisingly close |
+| Bi-LSTM      | Word2Vec 300d       |   0.872  |   0.857  | 0.929 | Slightly under-performs LR |
+| **Legal-BERT** | **Fine-tune**     | **0.952**| **0.948**| **0.971** | **+5.8 F1 vs LR, +13.9 vs NB** |
+
+ROC plot: [`results/roc_classaction.png`](results/roc_classaction.png). Confusion: BERT correctly identifies **108 / 116** 'Yes' cases (93 % recall) with only 8 false negatives.
+
+## 3.8 Results — `case_type`
+
+5-class task, 312 test cases. The model gap widens significantly on the long tail.
+
+| Model        | Features              | Accuracy | Macro-F1 | AUC   | F1 on smallest class¹ |
+|--------------|-----------------------|---------:|---------:|------:|----------------------:|
+| Naive Bayes  | TF-IDF (Complement)   |   0.776  |   0.684  | 0.944 | 0.222                 |
+| LR (TF-IDF)  | L2 · balanced         |   0.760  |   0.630  | 0.971 | **0.000** ← zero recall |
+| Bi-LSTM      | Word2Vec 300d         |   0.744  |   0.636  | 0.914 | 0.154                 |
+| **Legal-BERT** | **Fine-tune**       | **0.897**| **0.854**| **0.972** | **0.645**         |
+
+¹ Healthcare & Disability, n = 16 test cases. **Only Legal-BERT preserves long-tail performance** — LR drops to F1 = 0.000 on the rarest class.
+
+Confusion matrices: `results/confusion_matrices/{nb,lr,lstm,bert}_casetype_test.png`. Side-by-side grid: [`results/case_type_confusion_grid.png`](results/case_type_confusion_grid.png). Macro-F1 by model bar chart: [`results/case_type_macroF1_by_model.png`](results/case_type_macroF1_by_model.png).
+
+## 3.9 Reproducing
+
+W7 (local, CPU):
+```bash
+python -m src.classify.train --task class_action --model nb
+python -m src.classify.train --task class_action --model lr
+python -m src.classify.train --task case_type    --model nb
+python -m src.classify.train --task case_type    --model lr
+python -m src.classify.explain --task class_action       # SHAP plot
+python -m src.classify.explain --task case_type
+```
+
+W8 (Colab T4/A100 — see [`notebooks/06_classification_colab.ipynb`](notebooks/06_classification_colab.ipynb)):
+```bash
+python -m src.classify.train --task class_action --model lstm --device cuda
+python -m src.classify.train --task case_type    --model lstm --device cuda
+python -m src.classify.train --task class_action --model bert --device cuda
+python -m src.classify.train --task case_type    --model bert --device cuda
+```
+
+Every invocation appends one row per split to [`results/classification_metrics.csv`](results/classification_metrics.csv) and saves the pickled pipeline (NB/LR), `.pt` bundle (LSTM), or HF directory (BERT) under `models/`.
+
+Notebook walkthroughs:
+- [`notebooks/04_classification_class_action.ipynb`](notebooks/04_classification_class_action.ipynb) — NB + LR end-to-end on binary task
+- [`notebooks/05_classification_case_type.ipynb`](notebooks/05_classification_case_type.ipynb) — 4-model comparison on multi-class
+- [`notebooks/06_classification_colab.ipynb`](notebooks/06_classification_colab.ipynb) — Colab-ready W8 trainer
+
+Slides 7–9 drafts: [`presentation/slides.pptx`](presentation/slides.pptx).
+
+✅ **Status**: complete.
 
 ---
 
