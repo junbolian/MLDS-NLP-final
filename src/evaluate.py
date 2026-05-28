@@ -18,6 +18,7 @@ import argparse
 import json
 from pathlib import Path
 
+import matplotlib
 import pandas as pd
 from rouge_score import rouge_scorer
 from tqdm import tqdm
@@ -25,6 +26,7 @@ from tqdm import tqdm
 from src.utils import RESULTS_DIR, get_logger
 
 logger = get_logger(__name__)
+matplotlib.use("Agg")
 
 SUMMARY_GRANULARITIES = ("long", "short", "tiny")
 
@@ -83,6 +85,7 @@ def evaluate_summaries(
     predictions: pd.DataFrame,
     references: pd.DataFrame,
     *,
+    split: str | None = None,
     include_bertscore: bool = True,
     bertscore_model: str = "distilbert-base-uncased",
     bertscore_batch_size: int = 8,
@@ -92,6 +95,11 @@ def evaluate_summaries(
 
     if "case_id" not in predictions.columns:
         raise ValueError("Predictions CSV must contain a `case_id` column.")
+    if split is not None:
+        if "split" not in predictions.columns:
+            raise ValueError("Predictions CSV must contain `split` when --split is used.")
+        predictions = predictions[predictions["split"] == split].copy()
+
     merged = predictions.merge(
         references[["case_id", "long_ref", "short_ref", "tiny_ref"]],
         on="case_id",
@@ -212,6 +220,43 @@ def evaluate_classification(
     }
 
 
+def save_confusion_matrix_png(
+    confusion: list[list[int]] | pd.DataFrame,
+    *,
+    label_names: list[str],
+    output_path: str | Path,
+    title: str = "Confusion Matrix",
+) -> Path:
+    """Render a confusion matrix PNG from classification metrics output."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    cm = np.asarray(confusion)
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(5, 4) if len(label_names) == 2 else (7, 6))
+    im = ax.imshow(cm, cmap="Blues")
+    ax.set_xticks(range(len(label_names)))
+    ax.set_yticks(range(len(label_names)))
+    ax.set_xticklabels(label_names, rotation=30, ha="right")
+    ax.set_yticklabels(label_names)
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("True")
+    ax.set_title(title)
+    vmax = cm.max() if cm.size else 1
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            color = "white" if cm[i, j] > vmax / 2 else "black"
+            ax.text(j, i, int(cm[i, j]), ha="center", va="center", color=color, fontsize=9)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    fig.savefig(output, dpi=150)
+    plt.close(fig)
+    logger.info("Wrote confusion matrix PNG -> %s", output)
+    return output
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate summarization or classification outputs.")
     parser.add_argument("--task", choices=["summarization", "classification"], default="summarization")
@@ -219,12 +264,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--references", default="data/multilexsum_clean.parquet")
     parser.add_argument("--output", default=str(RESULTS_DIR / "summary_eval.csv"))
     parser.add_argument("--summary-output", default=str(RESULTS_DIR / "summary_eval_by_granularity.csv"))
+    parser.add_argument("--split", choices=["train", "val", "test"], help="Optional split filter.")
     parser.add_argument("--skip-bertscore", action="store_true")
     parser.add_argument("--bertscore-model", default="distilbert-base-uncased")
     parser.add_argument("--bertscore-batch-size", type=int, default=8)
     parser.add_argument("--device", choices=["cpu", "cuda", "mps"])
     parser.add_argument("--label-names", nargs="+",
                         help="Class names (classification only) — used in per-class report.")
+    parser.add_argument(
+        "--confusion-output",
+        help="Optional PNG path for the classification confusion matrix.",
+    )
     return parser
 
 
@@ -233,9 +283,17 @@ def _run_classification(args: argparse.Namespace) -> None:
     result = evaluate_classification(predictions, label_names=args.label_names)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.with_suffix(".json").open("w") as fh:
+    json_path = output.with_suffix(".json")
+    with json_path.open("w") as fh:
         json.dump(result, fh, indent=2)
-    logger.info("Wrote classification metrics → %s", output.with_suffix(".json"))
+    logger.info("Wrote classification metrics → %s", json_path)
+    if args.confusion_output and args.label_names:
+        save_confusion_matrix_png(
+            result["confusion"],
+            label_names=args.label_names,
+            output_path=args.confusion_output,
+            title=f"Confusion Matrix · {Path(args.predictions).stem}",
+        )
 
 
 def main() -> None:
@@ -249,6 +307,7 @@ def main() -> None:
     metrics = evaluate_summaries(
         predictions,
         references,
+        split=args.split,
         include_bertscore=not args.skip_bertscore,
         bertscore_model=args.bertscore_model,
         bertscore_batch_size=args.bertscore_batch_size,

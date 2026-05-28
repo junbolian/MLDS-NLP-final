@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](#)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](#)
 
-🤗 **Live Demo**: https://huggingface.co/spaces/<team>/multilexsum-demo *(Jianong to fill)*
+**Live demo**: [Hugging Face Space](https://huggingface.co/spaces/EvelynXuNU/NLP_FinalProject_demo) · Spaces entrypoint: [`app.py`](app.py)
 
 ---
 
@@ -15,23 +15,24 @@
 This project tackles Option 2 of the NLP final project using the **Multi-LexSum** dataset — 9,280 federal civil-rights case summaries authored by legal experts. We deliver three components:
 
 1. **Multi-granularity summarization** — long / short / tiny summaries for cases that frequently exceed 200 pages of source text.
-2. **Two classifiers** — predicting (a) whether a class action was sought (binary) and (b) the case type (5–7 grouped categories).
+2. **Two classifiers** — predicting (a) whether a class action was sought (binary) and (b) the grouped case type (5 categories).
 3. **Interactive Gradio app** — paste any case text and get all summaries + both predictions with explanations.
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/<team>/nlp-final-multilexsum.git
-cd nlp-final-multilexsum
+git clone https://github.com/junbolian/MLDS-NLP-final.git
+cd MLDS-NLP-final
 pip install -r requirements.txt
 
 # Download + cache data (~5 min, ~2 GB)
 python -m src.data --download
 
-# Reproduce all results (GPU recommended for §3.4-3.5)
-make all
+# Clean the canonical parquet
+python -m src.cleaning --force
 
-# Launch the Gradio app locally
+# Launch the Gradio app locally once the §3 model checkpoints are available
+# under models/ (the app uses the team's existing long_ref-trained models)
 python -m app.gradio_app
 ```
 
@@ -44,15 +45,16 @@ nlp-final-multilexsum/
 ├── src/
 │   ├── data.py               # HuggingFace loader + caching
 │   ├── cleaning.py           # regex + spaCy normalization
-│   ├── case_type_grouping.py # 10+ raw types → 5–7 main categories
+│   ├── case_type_grouping.py # 24 raw labels → 5 grouped categories
 │   ├── features.py           # TF-IDF / Word2Vec / BERT tokenizer
 │   ├── summarize/            # extractive, abstractive, tiny, pipeline
 │   ├── classify/             # NB, LR, Bi-LSTM, Legal-BERT
-│   ├── evaluate.py           # ROUGE / BERTScore / classification report
-│   └── explain.py            # SHAP + bertviz
-├── app/                      # Gradio app + inference entry point
+│   ├── evaluate.py           # ROUGE / BERTScore / classification reports + confusion plots
+│   └── explain.py            # SHAP + lightweight BERT attention export
+├── app/                      # Gradio app + inference / export entry points
 ├── models/                   # checkpoints (gitignored)
-└── results/                  # all figures and CSVs (PPT sources here)
+├── app.py                    # Hugging Face Spaces entrypoint
+└── results/                  # all figures, CSVs, prediction dumps, and slide assets
 ```
 
 ## Schedule
@@ -302,8 +304,8 @@ python -m src.summarize.extractive \
 python -m src.summarize.abstractive \
   --input data/multilexsum_clean.parquet \
   --output results/abstractive_summaries.csv \
-  --split test \
   --model-key bart-large-cnn \
+  --split test \
   --extractive-tokens 3500
 
 # Tiny T5 full fine-tune
@@ -434,63 +436,154 @@ Slides 7–9 drafts: [`presentation/slides.pptx`](presentation/slides.pptx).
 
 ---
 
-# §4 Interactive Tool & Evaluation  *(owner: Jianong · 🔴 TODO)*
+# §4 Interactive Tool & Evaluation  *(owner: Jianong · ✅ complete)*
 
 **Deadlines**: W6 HF Spaces hello-world · W7 dummy-model UI + PPT template · W9 real-model integration + explainability
 **Depends on**: §2 summarization pipeline + §3 trained models (for W9 only)
 
-## To do
+## 4.1 Gradio app architecture
 
-Sub-section numbering (mirrors slides 10-11):
+The app now lives under `app/` with one stable entrypoint, `app/inference.py`, and one UI layer, `app/gradio_app.py`. The design is intentionally split so the app, notebook workflows, and any Hugging Face Spaces wrapper all consume the same `predict(case_text)` contract rather than each loading models separately.
 
-1. **4.1 Gradio App Architecture** — three-tab design (Summaries / Predictions / Explainability) + UI screenshot
-2. **4.2 Inference Pipeline** — `app/inference.py`: model loading + single `predict()` entry point
-3. **4.3 Explainability** — SHAP for LR (top tokens), bertviz attention for BERT (sample heatmap)
-4. **4.4 Error Analysis** — 5 interesting cases: model disagreement, summary-vs-reference divergence, confidence-vs-correctness
-5. **4.5 Evaluation Framework** — `src/evaluate.py` unified interface (CSV / PNG outputs)
-6. **4.6 HuggingFace Spaces Deployment** — link, model quantization notes, free-tier limits handled
-7. **4.7 Local Usage** — `python -m app.gradio_app`
+The UI follows the project requirement of three tabs:
 
-## Deliverables checklist
+1. **Summaries** — generated long / short / tiny summaries plus optional reduction metadata
+2. **Predictions** — `class_action_sought` and grouped `case_type` predictions with confidences
+3. **Explainability** — live LR SHAP plots and a lightweight BERT attention heatmap for a representative example
 
-**Code — W6**:
-- [ ] HF Spaces created (free tier, public) — URL posted in team chat
-- [ ] `app/gradio_app.py` — minimal text-in / text-out placeholder, deployed
+This makes the demo coherent: one pasted case text flows through the same end-to-end pipeline the presentation describes.
 
-**Code — W7**:
-- [ ] `app/gradio_app.py` — three-tab UI scaffold; each tab wired to a dummy function returning fixed text
-- [ ] `presentation/template.pptx` — Northwestern purple, sans-serif, title 32pt / body 18pt
+## 4.2 Inference pipeline
 
-**Code — W9**:
-- [ ] `app/inference.py` — `predict(case_text) -> {summaries, class_action, case_type}` unified entry
-- [ ] `src/evaluate.py` (classification section) — `classification_report` + confusion matrix helpers
-- [ ] `src/explain.py` — SHAP for LR + bertviz attention for BERT
+The app inference path is:
 
-**Artifacts — W9**:
-- [ ] HF Spaces deployment with real models (fits within free-tier 16 GB image limit — use quantization or Inference API)
-- [ ] `notebooks/06_error_analysis.ipynb`
-- [ ] `results/error_cases.md` — 5 disagreement case writeups (case_id + model predictions + reference + your analysis)
-- [ ] Final demo video recording (your screen + your voice for slides 10-12; collect Jacob/Yujun/Feng audio for their slides)
+`raw case text -> LexRank reduction -> BART long summary -> BART short summary -> T5 tiny summary -> classification on generated long summary`
 
-**Slides — W9**: slides 10-12 drafts in `presentation/slides.pptx`
+The checked-in project baseline still uses the classifiers trained in §3 on the human-written `long_ref` summaries. Jianong's integration layer builds on those existing artifacts instead of retraining Feng's models inside the app scope. In the live demo, the app classifies the generated long summary with the team's saved baseline classifiers and reports that approximation explicitly in the metadata.
 
-🔴 **Status**: not yet written.
+`app/inference.py` returns a structured payload with:
+
+- `summaries` — long / short / tiny
+- `predictions` — class-action label + confidence, grouped case-type label + confidence
+- `explainability` — LR SHAP PNGs plus a saved BERT attention heatmap
+- `metadata` — model names, reduction statistics, and warnings
+
+## 4.3 Explainability
+
+Explainability is handled through the new `src/explain.py` façade.
+
+- **LR SHAP** remains the main faithful token-level explanation method because the sparse linear model yields exact, fast attributions over TF-IDF features.
+- **BERT attention** is exported as a compact heatmap for qualitative inspection. It is included as an interpretability aid, not as a claim of causal attribution.
+
+The app intentionally separates these roles: BERT is the strongest predictor, while LR is the most transparent explanation companion.
+
+## 4.4 Error analysis
+
+Error analysis is now organized around per-case prediction CSVs exported by `app/export_predictions.py` into `results/predictions/`. This keeps Jianong's workflow separate from Feng's training code while still turning the saved model artifacts into evidence-backed case studies.
+
+The notebook [`notebooks/06_error_analysis.ipynb`](notebooks/06_error_analysis.ipynb) merges:
+
+- cleaned ground-truth data
+- generated summaries
+- per-case predictions from all four §3 classifiers: Naive Bayes, LR, Bi-LSTM, and Legal-BERT
+
+Because the checked-in `results/abstractive_summaries.csv` is still the saved smoke-test artifact, the summary-divergence writeup comes from that subset, while the classifier disagreement / confidence / rare-class writeups come from the full test-split prediction exports.
+
+The companion file [`results/error_cases.md`](results/error_cases.md) defines the five required writeups:
+
+1. model disagreement
+2. summary hallucination / unsupported detail
+3. high confidence but wrong
+4. low confidence but correct
+5. rare-class failure or recovery
+
+The exported test-set predictions already surface the main patterns Jianong needs to discuss on slide 11:
+
+- **Boundary taxonomy cases split the model families.** `IM-CA-0025` is correctly recognized as *Immigration & Education* by NB and BERT, but LR drifts to *Criminal Justice* and the Bi-LSTM drifts to *Civil Rights & Equality* because the summary mixes labor exploitation, undocumented hiring, and RICO vocabulary.
+- **Overconfident mistakes cluster around prison-heavy wording.** In `DR-PA-0008`, every classifier predicts *Criminal Justice* even though the gold label is *Healthcare & Disability*; the incarceration frame overwhelms the ADA / medical-care cues.
+- **Legal-BERT is the only model that consistently recovers the rarest class.** On the 16 test cases labeled *Healthcare & Disability*, BERT gets 10 correct, compared with 2 for NB, 2 for Bi-LSTM, and 0 for LR.
+
+This gives slide 11 and the final report a reproducible place to source real examples rather than anecdotal ones.
+
+## 4.5 Evaluation framework
+
+`src/evaluate.py` remains the unified evaluation entrypoint for both major task families:
+
+- **Summarization** — ROUGE-1/2/L plus BERTScore against the Multi-LexSum references
+- **Classification** — accuracy, macro-F1, weighted-F1, AUC, per-class report JSON, and optional confusion-matrix PNG output from a prediction CSV
+
+Together with the export helper in `app/export_predictions.py`, this creates a full artifact chain:
+
+`trained model -> per-case prediction CSV -> JSON report -> confusion PNG -> notebook-based error analysis`
+
+## 4.6 Hugging Face Spaces deployment
+
+The repo now includes a root-level `app.py` so Hugging Face Spaces can import the Gradio demo directly. The public deployment is live at [EvelynXuNU/NLP_FinalProject_demo](https://huggingface.co/spaces/EvelynXuNU/NLP_FinalProject_demo). For deployment, the expected workflow is:
+
+1. make sure the baseline §3 model artifacts (`lr_*` and, ideally, `bert_*`) are available under `models/`
+2. keep only deployable model checkpoints under `models/` locally or in the Space storage
+3. install `requirements.txt`
+4. launch the Space through `app.py`
+
+The intended production configuration is:
+
+- BART + T5 for summarization
+- `bert_*` as the main classifiers when available
+- `lr_*` as the explanation companions and runtime fallback
+
+The current Jianong app layer auto-detects local summarization checkpoints at `models/bart-large-cnn` and `models/t5_tiny_summarizer` when they are present. Without those local directories, a fresh machine will still need internet access or a pre-populated Hugging Face cache before the summarization path can boot.
+
+Current deployment note: the public Space is intentionally storage-trimmed to stay under the free-tier repo cap. It keeps the local tiny-summary checkpoint, the grouped-case-type Legal-BERT checkpoint, and the LR checkpoints, while loading `facebook/bart-large-cnn` from the Hugging Face model hub at runtime. In that public configuration, `case_type` uses BERT and `class_action_sought` falls back to LR when the second BERT head is not bundled.
+
+Current artifact note: the packaged T5 tiny checkpoint is a smoke fine-tune artifact, which is enough to run the demo path but should not be overstated as a full final retraining result.
+
+If the BERT attention path is too heavy for live computation in Spaces, keep the LR SHAP flow live and precompute one representative attention artifact for the Explainability tab.
+
+## 4.7 Local usage
+
+```bash
+# one-time setup
+pip install -r requirements.txt
+
+# build the cleaned parquet
+python -m src.cleaning --force
+
+# optional: export per-case test CSVs for notebook 06 and slide 11
+python -m app.export_predictions --all --split test
+
+# launch the app
+python -m app.gradio_app
+```
+
+If `bert_*` artifacts are not present yet, the app falls back to the best available local LR classifiers and reports that fallback explicitly in the metadata warnings. If port `7860` is already in use locally, run `GRADIO_SERVER_PORT=7861 python -m app.gradio_app` instead.
+
+✅ **Status**: complete.
 
 ---
 
-# §5 Lessons & Future Work  *(owner: Jianong · 🔴 TODO)*
+# §5 Lessons & Future Work  *(owner: Jianong · ✅ complete)*
 
 **Deadline**: W9 (after §2 / §3 / §4 are filled in)
 
-## To do
+## 5.1 Three main takeaways
 
-Sub-section numbering (mirrors slide 12):
+**Summarization takeaway.** The dataset is too long for direct transformer generation, so the biggest technical win was not a larger model but a better pipeline. The extractive reduction stage makes the problem tractable and keeps the abstractive stage grounded in a manageable evidence packet.
 
-1. **5.1 Three main takeaways** — one each from summarization, classification, and the interactive tool (technical lessons, not generic "we learned a lot")
-2. **5.2 What didn't work** — one paragraph honest about a failure mode (specific hallucination pattern, BERT overfitting on small case_type groups, etc.)
-3. **5.3 Future work** — 2-3 concrete extensions (e.g. Legal-LLaMA fine-tuning, hierarchical attention pooling, retrieval-augmented summarization)
+**Classification takeaway.** Legal-BERT is clearly the strongest classifier on both tasks, but the most important lesson is *why*: it preserves performance on the long-tail multi-class labels where classical baselines collapse. The grouped `case_type` task shows that architecture choice matters most when the label distribution is imbalanced and the semantic distinctions are subtle.
 
-🔴 **Status**: not yet written.
+**Tool / integration takeaway.** The main engineering lesson was ownership-friendly integration: Jianong's app layer had to turn the team's existing summarization and classification artifacts into one demo surface without rewriting or retraining the underlying models.
+
+## 5.2 What didn't work
+
+The main weakness is that summarization quality is still the fragile link in the full stack. Even when the classifier is strong, a generated long summary can omit or distort the very legal cues the classifier needs. This creates a compounding failure mode: one hallucinated or incomplete procedural detail can make the summary look plausible while still pushing downstream classification in the wrong direction. In other words, the app is only as reliable as its intermediate representation.
+
+## 5.3 Future work
+
+1. **Retrieval-augmented summarization** — instead of one fixed extractive packet, retrieve the most relevant spans for distinct sub-goals such as claims, procedural posture, and remedies before abstractive generation.
+2. **Classifier retraining on generated summaries** — if the team wants a stricter deployment match later, retrain the classifiers on machine-generated long summaries rather than only the reference summaries.
+3. **Domain-adapted generative models** — experiment with legal-domain instruction tuning or a smaller legal LLM to improve factual consistency in long and short summaries.
+
+✅ **Status**: complete.
 
 ---
 
@@ -521,33 +614,6 @@ Sub-section numbering (mirrors slide 12):
 3. One key visual per slide; if you want two, split the slide
 
 ---
-
-## How to Replace Your Section
-
-If you're a teammate filling in your section:
-
-1. **Open this file in your editor.**
-2. **Find your section header** (e.g., `# §2 Multi-Granularity Summarization`).
-3. **Delete the entire `> TODO` block and the `🔴 Status: not yet written.` line.**
-4. **Replace with your actual content**, keeping the sub-section numbering (2.1, 2.2, …) as listed in the TODO checklist so the structure stays consistent.
-5. **Add image/CSV references** as relative links — figures live in `results/`, e.g. `![ROC](results/training_curves/roc_classaction.png)`.
-6. **Update the status line** at the top of your section from `🔴 TODO` to `✅ complete`.
-7. **Commit with a clear message**: `docs(readme): fill §3 classification`
-
-If you need to add a sub-section, put it at the end of your block (e.g., 3.10) — don't insert into Jacob's or others' blocks.
-
----
-
-## Working Agreement
-
-A few rules we follow to keep the project clean:
-
-1. **Single source of truth for data**: `data/multilexsum_clean.parquet` is the only dataset file anyone reads. Don't re-clean from raw.
-2. **Slide drafts due W8 end, not W9** — placeholder figures OK at this stage.
-3. **Figures come from `results/`** — don't screenshot from notebooks; re-export the figure as PNG into `results/` and reference the file path in slides.
-4. **Replace TODO blocks via PR, not chat** — keep README as the canonical record of what's done.
-5. **Gradio starts in W7 with dummy models** — don't wait for real models to be done.
-6. **Weekly sync**: Sundays 21:00 Beijing time, 30 min.
 
 ## Citation
 
